@@ -39,6 +39,7 @@ class PositionalEncoding(nn.Module):
 class UnetBlock(nn.Module):
     def __init__(self, shape, in_c, out_c, residual = False):
         super().__init__()
+        # 层归一化, 不知道有什么用
         self.ln = nn.LayerNorm(shape)
         self.conv1 = nn.Conv2d(in_c, out_c, 3, 1, 1)
         self.conv2 = nn.Conv2d(out_c, out_c, 3, 1, 1)
@@ -65,4 +66,135 @@ class UnetBlock(nn.Module):
         out = self.activation(out)
 
         return out
+
+
+def get_img_shape():
+    # MNIST数据集 img_shape
+    return (1, 28, 28)
+
+# 输入通道和输出通道
+# 输出通道数即为使用卷积核的数量
+# 假设输入通道为3, 输出通道为32, 则使用32个卷积核对3个通道进行处理
+# 每个卷积核独立对三个通道进行卷积, 每个卷积核生成3个特征图, 拼接起来即为1个输出通道, 32个卷积核独立处理
+class Unet(nn.Module):
+    def __init__(self, n_steps, channels = None, pe_dim = 10, residual = False):
+        super().__init__()
+        if channels is None:
+            channels = [10, 20, 40, 80]
+
+        C, H, W = get_img_shape()
+        layers = len(channels)
+
+        layers_H = [H]
+        layers_W = [W]
+
+        c_H = H
+        c_W = W
+
+        # 遍历到倒数第二层, 模拟下采样过程, c_H和c_W为每次下采样后特征图的H和W
+        for _ in range(0, layers - 1):
+            c_H //= 2
+            c_W //= 2
+
+            layers_H.append(c_H)
+            layers_W.append(c_W)
+
+        self.pe = PositionalEncoding(n_steps, pe_dim)
+
+        self.encoders = nn.ModuleList()
+        self.decoders = nn.ModuleList()
+
+        self.pe_encoders = nn.ModuleList()
+        self.pe_decoders = nn.ModuleList()
+
+        self.down = nn.ModuleList()
+        self.up = nn.ModuleList()
+
+        pre_channel = C
+
+        # Unet编码器部分, 每次下采样后通道数, 特征图的宽和高都会变化
+        for channel, c_H, c_W in zip(channels[0:-1], layers_H[0:-1], layers_W[0:-1]):
+            # 时间步编码头
+            # 下面都是ModuleList套Sequential结构, 每个Sequential作为ModuleList中的一个元素
+            self.pe_encoders.append(
+                nn.Sequential(
+                    nn.Linear(pe_dim, pre_channel),
+                    nn.ReLU(),
+                    nn.Linear(pre_channel, pre_channel)
+                )
+            )
+
+            self.encoders.append(
+                nn.Sequential(
+                    UnetBlock((pre_channel, c_H, c_W),
+                              pre_channel,
+                              channel,
+                              residual = residual),
+                    UnetBlock((channel, c_H, c_W),
+                              channel,
+                              channel,
+                              residual = residual),
+                )
+            )
+
+            # 下采样: 特征图尺度减半(2*2卷积核, 步长为2)
+            self.down.append(
+                nn.Conv2d(channel, channel, 2, 2)
+            )
+
+            pre_channel = channel
+
+        # 中间层处理
+        self.pe_mid = nn.Linear(pe_dim, pre_channel)
+        channel = channels[-1]
+
+        self.mid = nn.Sequential(
+            UnetBlock((pre_channel, layers_H[-1], layers_W[-1]),
+                      pre_channel,
+                      channel,
+                      residual = residual),
+            UnetBlock((channel, layers_H[-1], layers_W[-1]),
+                      channel,
+                      channel,
+                      residual = residual)
+        )
+        pre_channel = channel
+
+        # channels[-2::-1]: 列表[起始:结束:步长]
+        # 从倒数第二个元素开始, 结束位置为表头, 步长为-1
+        for channel, c_H, c_W in zip(channels[-2::-1], layers_H[-2::-1], layers_W[-2::-1]):
+            self.pe_decoders.append(
+                nn.Linear(pe_dim, pre_channel)
+            )
+
+            self.up.append(
+                # 反卷积上采样
+                nn.ConvTranspose2d(pre_channel, channel, 2, 2)
+            )
+
+            self.decoders.append(
+                # 这里输入是channel*2, 因为在Unet解码器部分要跳跃连接, 要将编码器对应部分拼接后输入到decoder
+                # 这里输入是channel*2而不是pre_channel*2, 因为解码器中先进行上采样再输入到decoder中
+                nn.Sequential(
+                    UnetBlock((channel * 2, c_H, c_W),
+                              channel * 2,
+                              channel,
+                              residual = residual),
+                    UnetBlock((channel, c_H, c_W),
+                              channel,
+                              channel,
+                              residual = residual)))
+
+            prev_channel = channel
+
+            # 输出投影图, 保持输入尺寸(3*3卷积核, 步长1, 填充1不会导致特征图变化)
+            self.conv_out = nn.Conv2d(prev_channel, C, 3, 1, 1)
+
+
+    def forwrd(self, x, t):
+        n = t.shape[0]
+        t = self.pe(t)
+
+
+
 
