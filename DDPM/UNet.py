@@ -36,3 +36,33 @@ class PositionalEncoding(nn.Module):
         return self.embedding(t)
 
 
+class UnetBlock(nn.Module):
+    def __init__(self, shape, in_c, out_c, residual = False):
+        super().__init__()
+        self.ln = nn.LayerNorm(shape)
+        self.conv1 = nn.Conv2d(in_c, out_c, 3, 1, 1)
+        self.conv2 = nn.Conv2d(out_c, out_c, 3, 1, 1)
+        self.activation = nn.ReLU()
+        self.residual = residual
+
+        # 当输入通道数和输出通道数相等时, 残差连接部分直接使用恒等映射
+        # 否则使用1*1卷积调整通道数, 1*1卷积核可以改变通道数而不改变空间维度(高和宽)
+        if residual:
+            if in_c == out_c:
+                self.residual_conv = nn.Identity()
+            else:
+                self.residual_conv = nn.Conv2d(in_c, out_c, 1)
+
+    def forward(self, x):
+        out = self.ln(x)
+        out = self.conv1(out)
+        out = self.activation(out)
+        out = self.conv2(out)
+
+        # 残差连接, 将out和初始输入x相加
+        if self.residual:
+            out += self.residual_conv(x)
+        out = self.activation(out)
+
+        return out
+
