@@ -107,8 +107,8 @@ class Unet(nn.Module):
         self.pe_encoders = nn.ModuleList()
         self.pe_decoders = nn.ModuleList()
 
-        self.down = nn.ModuleList()
-        self.up = nn.ModuleList()
+        self.downs = nn.ModuleList()
+        self.ups = nn.ModuleList()
 
         pre_channel = C
 
@@ -138,7 +138,7 @@ class Unet(nn.Module):
             )
 
             # 下采样: 特征图尺度减半(2*2卷积核, 步长为2)
-            self.down.append(
+            self.downs.append(
                 nn.Conv2d(channel, channel, 2, 2)
             )
 
@@ -167,7 +167,7 @@ class Unet(nn.Module):
                 nn.Linear(pe_dim, pre_channel)
             )
 
-            self.up.append(
+            self.ups.append(
                 # 反卷积上采样
                 nn.ConvTranspose2d(pre_channel, channel, 2, 2)
             )
@@ -185,16 +185,50 @@ class Unet(nn.Module):
                               channel,
                               residual = residual)))
 
-            prev_channel = channel
+            pre_channel = channel
 
             # 输出投影图, 保持输入尺寸(3*3卷积核, 步长1, 填充1不会导致特征图变化)
-            self.conv_out = nn.Conv2d(prev_channel, C, 3, 1, 1)
+            self.conv_out = nn.Conv2d(pre_channel, C, 3, 1, 1)
 
 
     def forwrd(self, x, t):
         n = t.shape[0]
         t = self.pe(t)
 
+        encoder_outs = []
+
+        for pe_encoder, encoder, down in zip(self.pe_encoders, self.encoders, self.downs):
+            # pe_encoder(t)的维度是 (batch, channel), 因后续要与x相加, 故要reshape成(batch, channel, 1, 1)方便广播
+            # x的维度是 (batch, channel, H, W)
+            pe = pe_encoder(t).reshape(n, -1, 1, 1)
+            x = encoder(x + pe)
+            # 保存用于解码器跳跃连接
+            encoder_outs.append(x)
+
+            x = down(x)
+
+        pe = self.pe_mid(t).reshape(n, -1, 1, 1)
+        x = self.mid(x + pe)
+
+        for pe_decoder, decoder, up, encoder_out in zip(self.pe_decoders, self.decoders, self.ups, encoder_outs):
+            pe = pe_decoder(t).reshape(n, -1, 1, 1)
+            # 编码时先编码再下采样, 解码时先上采样再解码, 顺序相反
+            x = up(x)
+
+            # 上采样后, 特征图的尺寸可能和编码器对应的尺寸出现差异, 为了跳跃连接, 需要对尺寸进行填充校准
+            pad_y = encoder_out.shape[2] - x.shape[2]  # H
+            pad_x = encoder_out.shape[3] - x.shape[3]  # W
+
+            # 对称填充, 先填充W(左右方向), 在填充H(上下方向)
+            x = F.pad(x, (pad_x // 2, pad_x - pad_x // 2, pad_y // 2, pad_y - pad_y // 2))
+
+            # 跳跃连接, 在通道维度连接
+            x = torch.concat((encoder_out, x), dim = 1)
+
+            x = decoder(x + pe)
+
+        x = self.conv_out(x)
+        return x
 
 
 
