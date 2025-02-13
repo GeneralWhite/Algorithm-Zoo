@@ -231,4 +231,21 @@ class Unet(nn.Module):
         return x
 
 
+unet_1_cfg = {
+    'channels': [10, 20, 40, 80],
+    'pe_dim': 128
+}
 
+
+unet_res_cfg = {
+    'channels': [10, 20, 40, 80],
+    'pe_dim': 128,
+    'residual': True
+}
+
+
+def build_network(config: dict, n_steps):
+    ## **用于解包字典为关键字参数
+    network = Unet(n_steps, **config)
+
+    return network
